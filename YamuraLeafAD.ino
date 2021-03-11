@@ -29,8 +29,6 @@
          Any devices can act as master or salve.
 */
 
-//#include <esp_now.h>
-//#include <WiFi.h>
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 
@@ -38,34 +36,39 @@
 // included BEFORE including the 9DS1 library.
 #include <Wire.h>
 #include <SPI.h>
-#include <SparkFunLSM9DS1.h>
+// 4 channel A2D
+#include <SparkFun_ADS1015_Arduino_Library.h> //Click here to get the library: http://librarymanager/All#SparkFun_ADS1015
+// 16 channel digial IO
+#include <SparkFunSX1509.h> // Include SX1509 library
 
 #define CHANNEL 3
 #define PRINTSCANRESULTS 0
 #define DELETEBEFOREPAIR 0
-#define MESSAGE_LEN 11
+#define MESSAGE_LEN 14
 struct LeafData
 {
-  char leafType;            // 1 byte  - type, in this case 'A' for accelerometer
+  char leafType;            // 1 byte  - type, in this case 'I' for IO - might need to make this 2 characters...
   unsigned long timeStamp;  // 4 bytes - millis() value of sample
-  int16_t values[3];        // 6 bytes - X,Y,Z acceleration values
+  int16_t a2dValues[4];     // 8 bytes, 2 per a2d channel
+  int16_t digitalValue;     // 1 byte, 1 bit per digital channel
 };
 union DataToSend
 {
   struct LeafData leafData;
-  uint8_t dataBytes[11];
+  uint8_t dataBytes[MESSAGE_LEN];
 } toSend;
 
 unsigned long lastTime;
 unsigned long curTime;
-unsigned long sampleInterval = 50;
+unsigned long sampleInterval = 75;
 uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
-//////////////////////////
-// LSM9DS1 Library Init //
-//////////////////////////
-// Use the LSM9DS1 class to create an object. [imu] can be
-// named anything, we'll refer to that throught the sketch.
-LSM9DS1 imu;
+
+// ADS1015 sensor
+ADS1015 adcSensor;
+
+// SX1509 I2C address (set by ADDR1 and ADDR0 (00 by default):
+const byte SX1509_ADDRESS = 0x3E;  // SX1509 I2C address
+SX1509 io; // Create an SX1509 object to be used throughout
 //
 //
 //
@@ -88,39 +91,47 @@ void setup()
   // set last and current sample 
   lastTime = millis();
   curTime = millis();
-  toSend.leafData.leafType = 'A';
+  toSend.leafData.leafType = 'I';
 
   Wire.begin();
-
-  while (!imu.begin()) // with no arguments, this uses default addresses (AG:0x6B, M:0x1E) and i2c port (Wire).
+  // start ads1015 with default settings
+  while (!adcSensor.begin())
   {
-    Serial.println("Failed to communicate with LSM9DS1.");
-    Serial.println("Double-check wiring.");
-    Serial.println("Default settings in this sketch will " \
-                   "work for an out of the box LSM9DS1 " \
-                   "Breakout, but may need to be modified " \
-                   "if the board jumpers are.");
-    delay(5000);
+    Serial.println("ADS1015 not found. Try again...");
+    delay(1000);
+  }
+  // start sx1509 with default settings
+  while (!io.begin(SX1509_ADDRESS))
+  {
+    Serial.println("Failed to communicate.");
+    while (1) ;
+  }
+  // set all digital io for input
+  for(int idx = 0; idx < 16; idx++)
+  {
+    io.pinMode(idx, INPUT_PULLUP);
   }
 }
 //
-// read accelerometer, push data to hub
+// read sensors, push data to hub
 //
 void loop() 
 {
   curTime = millis();
   if((long)(curTime - lastTime) > sampleInterval)
   {
-    if ( imu.accelAvailable() )
+    toSend.leafData.timeStamp = curTime;
+    for(int idx = 0; idx < 4; idx++) 
     {
-      imu.readAccel();
-      toSend.leafData.timeStamp = curTime;
-      toSend.leafData.values[0] = imu.ax;
-      toSend.leafData.values[1] = imu.ay;
-      toSend.leafData.values[2] = imu.az;
-      sendData();
-      lastTime = millis();
+      toSend.leafData.a2dValues[idx] = adcSensor.getSingleEnded(idx);
     }
+    toSend.leafData.digitalValue = 0;
+    for(int idx = 0; idx < 16; idx++)
+    {
+      toSend.leafData.digitalValue |= (io.digitalRead(idx) << idx);
+    }
+    sendData();
+    lastTime = millis();
   }
 }
 //
@@ -146,10 +157,12 @@ void sendData()
   Serial.print(toSend.leafData.leafType);
   Serial.print(" Time ");
   Serial.print(toSend.leafData.timeStamp);
-  Serial.print(" Values ");
-  Serial.print(toSend.leafData.values[0]); Serial.print(" ");
-  Serial.print(toSend.leafData.values[1]); Serial.print(" ");
-  Serial.print(toSend.leafData.values[2]); Serial.print(" ");
+  Serial.print(" A2D Values ");
+  for(int idx = 0; idx < 4; idx++)
+  {
+    Serial.print(toSend.leafData.a2dValues[idx]); Serial.print(" ");
+  }
+  Serial.print(toSend.leafData.digitalValue, BIN); Serial.print(" ");
 
   Serial.print(" bytes ");
   Serial.print(toSend.dataBytes[0], HEX);

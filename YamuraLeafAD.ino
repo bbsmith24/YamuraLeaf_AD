@@ -1,45 +1,20 @@
-/**
-   ESPNOW - Basic communication - Master
-   Date: 26th September 2017
-   Author: Arvind Ravulavaru <https://github.com/arvindr21>
-   Purpose: ESPNow Communication between a Master ESP32 and a Slave ESP32
-   Description: This sketch consists of the code for the Master module.
-   Resources: (A bit outdated)
-   a. https://espressif.com/sites/default/files/documentation/esp-now_user_guide_en.pdf
-   b. http://www.esploradores.com/practica-6-conexion-esp-now/
+/*
+   Yamura Leaf - A2D and Digital IO
+   BBS 3/2021
+   send 16 digital I/O and 4 analog to digital values to hub
 
-   << This Device Master >>
-
-   Flow: Master
-   Step 1 : ESPNow Init on Master and set it in STA mode
-   Step 2 : Start scanning for Slave ESP32 (we have added a prefix of `hub` to the SSID of hub for an easy setup)
-   Step 3 : Once found, add Slave as peer
-   Step 4 : Register for send callback
-   Step 5 : Start Transmitting data from Master to Slave
-
-   Flow: Slave
-   Step 1 : ESPNow Init on Slave
-   Step 2 : Update the SSID of Slave with a prefix of `hub`
-   Step 3 : Set Slave in AP mode
-   Step 4 : Register for receive callback and wait for data
-   Step 5 : Once data arrives, print it in the serial monitor
-
-   Note: Master and Slave have been defined to easily understand the setup.
-         Based on the ESPNOW API, there is no concept of Master and Slave.
-         Any devices can act as master or salve.
-*/
+   for ESP8266
+ */
 
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 
-// The SFE_LSM9DS1 library requires both Wire and SPI be
-// included BEFORE including the 9DS1 library.
 #include <Wire.h>
-#include <SPI.h>
+//#include <SPI.h>
 // 4 channel A2D
-#include <SparkFun_ADS1015_Arduino_Library.h> //Click here to get the library: http://librarymanager/All#SparkFun_ADS1015
+#include <SparkFun_ADS1015_Arduino_Library.h>
 // 16 channel digial IO
-#include <SparkFunSX1509.h> // Include SX1509 library
+#include <SparkFunSX1509.h>
 
 #define CHANNEL 3
 #define PRINTSCANRESULTS 0
@@ -48,7 +23,7 @@
 struct LeafData
 {
   char leafType;            // 1 byte  - type, in this case 'I' for IO - might need to make this 2 characters...
-  unsigned long timeStamp;  // 4 bytes - millis() value of sample
+  unsigned long timeStamp;  // 4 bytes - micros() value of sample
   int16_t a2dValues[4];     // 8 bytes, 2 per a2d channel
   int16_t digitalValue;     // 1 byte, 1 bit per digital channel
 };
@@ -60,7 +35,9 @@ union DataToSend
 
 unsigned long lastTime;
 unsigned long curTime;
-unsigned long sampleInterval = 75;
+unsigned long targetInterval = 100000;  // (sample at 10Hz)
+unsigned long sampleInterval = 100000;
+unsigned long lastInterval;
 uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
 
 // ADS1015 sensor
@@ -69,17 +46,24 @@ ADS1015 adcSensor;
 // SX1509 I2C address (set by ADDR1 and ADDR0 (00 by default):
 const byte SX1509_ADDRESS = 0x3E;  // SX1509 I2C address
 SX1509 io; // Create an SX1509 object to be used throughout
+
+#define ESP8266_LED 5
 //
 //
 //
 void setup()
 {
   Serial.begin(115200);
+  int blinkState = HIGH;
+  pinMode(ESP8266_LED, OUTPUT); // built in LED
+ 
   //Set device in STA mode to begin with
   WiFi.mode(WIFI_STA);
   // This is the mac address of this device
-  Serial.print("ESP-NOW accelerometer leaf at ");
+  #ifdef DEBUG_PRINT
+  Serial.print("ESP-NOW digital/A2D leaf at ");
   Serial.print("MAC: "); Serial.println(WiFi.macAddress());
+  #endif
   // Init ESPNow with a fallback logic
   InitESPNow();
   // Once ESPNow is successfully Init, we will register for Send CB to
@@ -89,38 +73,74 @@ void setup()
   esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
 
   // set last and current sample 
-  lastTime = millis();
-  curTime = millis();
+  lastTime = micros();
+  curTime = micros();
   toSend.leafData.leafType = 'I';
 
   Wire.begin();
   // start ads1015 with default settings
   while (!adcSensor.begin())
   {
+    #ifdef DEBUG_PRINT
     Serial.println("ADS1015 not found. Try again...");
-    delay(1000);
+    #endif
+    curTime = millis();
+    lastTime = curTime;
+    while(curTime - lastTime < 5000000)
+    {
+      digitalWrite(ESP8266_LED, blinkState);
+      delay(500);
+      blinkState = blinkState == LOW ? blinkState == HIGH :blinkState == LOW; 
+      lastTime = millis();
+    }
   }
+  digitalWrite(ESP8266_LED, LOW);
   // start sx1509 with default settings
   while (!io.begin(SX1509_ADDRESS))
   {
-    Serial.println("Failed to communicate.");
-    while (1) ;
+    #ifdef DEBUG_PRINT
+    Serial.println("SX1509 not found. Try again...");
+    #endif
+    curTime = millis();
+    lastTime = curTime;
+    while(curTime - lastTime < 5000000)
+    {
+      digitalWrite(ESP8266_LED, blinkState);
+      delay(500);
+      blinkState = blinkState == LOW ? blinkState == HIGH :blinkState == LOW; 
+      lastTime = millis();
+    }
   }
+  digitalWrite(ESP8266_LED, LOW);
   // set all digital io for input
   for(int idx = 0; idx < 16; idx++)
   {
     io.pinMode(idx, INPUT_PULLUP);
   }
+  curTime = micros();
+  lastTime = curTime;
 }
 //
 // read sensors, push data to hub
 //
 void loop() 
 {
-  curTime = millis();
-  if((long)(curTime - lastTime) > sampleInterval)
+  curTime = micros();
+  lastInterval = curTime - lastTime; 
+  if(lastInterval >= sampleInterval)
   {
+    if(lastInterval > targetInterval)
+    {
+      sampleInterval = targetInterval - (lastInterval - targetInterval);
+      #ifdef DEBUG_PRINT
+      Serial.print("Target interval ");Serial.println(targetInterval);
+      Serial.print("Last interval ");Serial.println(lastInterval);
+      Serial.print("Delta ");Serial.println((lastInterval - targetInterval));
+      Serial.print("New sample interval ");Serial.println(sampleInterval); 
+      #endif
+    }
     toSend.leafData.timeStamp = curTime;
+    lastTime = curTime;
     for(int idx = 0; idx < 4; idx++) 
     {
       toSend.leafData.a2dValues[idx] = adcSensor.getSingleEnded(idx);
@@ -131,7 +151,6 @@ void loop()
       toSend.leafData.digitalValue |= (io.digitalRead(idx) << idx);
     }
     sendData();
-    lastTime = millis();
   }
 }
 //
@@ -142,10 +161,12 @@ void sendData()
   // was disconnected from hub, try to reconnect
   if(!esp_now_is_peer_exist(hub_addr))
   {
+    #ifdef DEBUG_PRINT
     Serial.println("Reconnectting");
+    #endif
     uint8_t addStatus = esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
   }
-  //const uint8_t *hub_addr = hub.hub_addr;
+  #ifdef DEBUG_PRINT
   Serial.print("To ");
   Serial.print(hub_addr[0], HEX);
   for(int idx = 1; idx < 6; idx++)
@@ -163,7 +184,6 @@ void sendData()
     Serial.print(toSend.leafData.a2dValues[idx]); Serial.print(" ");
   }
   Serial.print(toSend.leafData.digitalValue, BIN); Serial.print(" ");
-
   Serial.print(" bytes ");
   Serial.print(toSend.dataBytes[0], HEX);
   for(int idx = 1; idx < MESSAGE_LEN; idx++)
@@ -172,11 +192,11 @@ void sendData()
     Serial.print(toSend.dataBytes[idx], HEX);
   }
   Serial.print("\n");
+  #endif
   uint8_t result = esp_now_send(hub_addr, &toSend.dataBytes[0], sizeof(LeafData));
   switch(result)
   {
     case 0:
-      //Serial.println("Success");
       break;
     /* 
     case ESP_ERR_ESPNOW_NOT_INIT:
@@ -196,7 +216,9 @@ void sendData()
       break;
     */
     default:
+      #ifdef DEBUG_PRINT
       Serial.println("Unknown error");
+      #endif
       break;
   }
 }
@@ -205,21 +227,27 @@ void sendData()
 //
 void InitESPNow() {
   WiFi.disconnect();
-  if (esp_now_init() == 0) {
+  if (esp_now_init() == 0) 
+  {
+    #ifdef DEBUG_PRINT
     Serial.println("ESPNow Init Success");
+    #endif
   }
-  else {
+  else 
+  {
+    #ifdef DEBUG_PRINT
     Serial.println("ESPNow Init Failed");
-    // Retry InitESPNow, add a counte and then restart?
-    // InitESPNow();
-    // or Simply Restart
+    #endif
+    // restart
     ESP.restart();
   }
 }
 //
 // callback when data is sent from Master to Slave
 //
-void OnDataSent(uint8_t *mac_addr, uint8_t status) {
+void OnDataSent(uint8_t *mac_addr, uint8_t status) 
+{
+  #ifdef DEBUG_PRINT
   if(status != 0)
   {
     char macStr[18];
@@ -231,4 +259,5 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status) {
     Serial.print(" Failed: ");
     Serial.println(status);
   }
+  #endif
 }

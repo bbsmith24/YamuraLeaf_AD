@@ -5,7 +5,7 @@
 
    for ESP8266
  */
-
+//#define DEBUG_PRINT
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 
@@ -33,11 +33,19 @@ union DataToSend
   uint8_t dataBytes[MESSAGE_LEN];
 } toSend;
 
+struct HubTimeStamp
+{
+  char msgType;
+  unsigned long timeStamp;  // 4 bytes - millis() value of sample
+};
+
 unsigned long lastTime;
 unsigned long curTime;
 unsigned long targetInterval = 100000;  // (sample at 10Hz)
 unsigned long sampleInterval = 100000;
 unsigned long lastInterval;
+unsigned long timestampAdjust = 0;
+
 uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
 
 // ADS1015 sensor
@@ -69,6 +77,9 @@ void setup()
   // Once ESPNow is successfully Init, we will register for Send CB to
   // get the status of Trasnmitted packet
   esp_now_set_self_role(ESP_NOW_ROLE_CONTROLLER);
+  // register for receive callback for data send response
+  esp_now_register_recv_cb(OnDataRecv);
+  //
   esp_now_register_send_cb(OnDataSent);
   esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
 
@@ -139,7 +150,7 @@ void loop()
       Serial.print("New sample interval ");Serial.println(sampleInterval); 
       #endif
     }
-    toSend.leafData.timeStamp = curTime;
+    toSend.leafData.timeStamp = curTime - timestampAdjust;;
     lastTime = curTime;
     for(int idx = 0; idx < 4; idx++) 
     {
@@ -223,6 +234,62 @@ void sendData()
   }
 }
 //
+// send data
+//
+void requestTimestamp()
+{
+  uint8_t msgType = 'T';
+  #ifdef DEBUG_PRINT
+  Serial.print("To ");
+  Serial.print(hub_addr[0], HEX);
+  for(int idx = 1; idx < 6; idx++)
+  {
+    Serial.print(":");
+    Serial.print(hub_addr[idx], HEX);
+  }
+  Serial.print(" Type ");
+  Serial.println((char)msgType);
+  #endif
+  uint8_t result = esp_now_send(hub_addr, &msgType, sizeof(msgType));
+  #ifdef DEBUG_PRINT
+  switch(result)
+  {
+    case 0:
+      break;
+    case ESP_ERR_ESPNOW_NOT_INIT:
+      Serial.println("\nESPNOW not initialized Error");
+      break;
+    case ESP_ERR_ESPNOW_ARG:
+      Serial.println("\nInvalid Argument Error");
+      break;
+    case ESP_ERR_ESPNOW_NO_MEM:
+      Serial.println("\nOut of memory Error");
+      break;
+    case ESP_ERR_ESPNOW_FULL:
+      Serial.println("\nPeer list full Error");
+      break;
+    case ESP_ERR_ESPNOW_NOT_FOUND:
+      Serial.println("\nPeer not found Error");
+      break;
+    case ESP_ERR_ESPNOW_INTERNAL:
+      Serial.println("\nInternal Error");
+      break;
+    case ESP_ERR_ESPNOW_EXIST:
+      Serial.println("\nPeer has existed Error");
+      break;
+    case ESP_ERR_ESPNOW_IF:
+      Serial.println("\nInterface error Error");
+      break;
+    default:
+      Serial.print("Other message send error ");
+      Serial.print(result);
+      Serial.print(" error base ");
+      Serial.println(ESP_ERR_ESPNOW_BASE);
+      break;
+  }
+  #endif
+}
+//
 // Init ESP Now with fallback
 //
 void InitESPNow() {
@@ -247,9 +314,14 @@ void InitESPNow() {
 //
 void OnDataSent(uint8_t *mac_addr, uint8_t status) 
 {
-  #ifdef DEBUG_PRINT
-  if(status != 0)
+// first good send request timestamp adjustment
+  if((status == 0) && (timestampAdjust == 0))
   {
+    requestTimestamp();
+  }
+  else if(status != 0)
+  {
+    #ifdef DEBUG_PRINT
     char macStr[18];
     Serial.print("Last Packet Sent to: ");
     for(int idx = 0; idx < 6; idx++)
@@ -258,6 +330,33 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status)
     }
     Serial.print(" Failed: ");
     Serial.println(status);
+    #endif
   }
-  #endif
+}
+//
+// callback when data is received
+//
+void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
+{
+  Serial.print("Recv ");Serial.print(data_len);Serial.print(" bytes from: ");
+  for(int idx = 0; idx < 6; idx++)
+  {
+    Serial.print(mac_addr[idx], HEX);Serial.print(":");
+  }
+  HubTimeStamp hubTimestamp;
+  memcpy(&hubTimestamp, data, sizeof(hubTimestamp));
+  unsigned long localTs = micros();
+  timestampAdjust =  localTs - hubTimestamp.timeStamp;
+  Serial.print(" local timestamp ");
+  Serial.print (localTs);
+  Serial.print (" ");
+  Serial.print (localTs,HEX);
+  Serial.print(" HUB timestamp ");
+  Serial.print (hubTimestamp.timeStamp);
+  Serial.print (" ");
+  Serial.print (hubTimestamp.timeStamp, HEX);
+  Serial.print(" adjustment ");
+  Serial.print (timestampAdjust);
+  Serial.print (" ");
+  Serial.println (timestampAdjust, HEX);
 }

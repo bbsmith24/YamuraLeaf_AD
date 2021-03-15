@@ -6,6 +6,8 @@
    for ESP8266
  */
 //#define DEBUG_PRINT
+#define TARGET_INTERVAL 50000
+
 #include <ESP8266WiFi.h>
 #include <espnow.h>
 
@@ -41,8 +43,8 @@ struct HubTimeStamp
 
 unsigned long lastTime;
 unsigned long curTime;
-unsigned long targetInterval = 100000;  // (sample at 10Hz)
-unsigned long sampleInterval = 100000;
+unsigned long targetInterval = TARGET_INTERVAL;  // (sample at 20Hz)
+unsigned long sampleInterval = TARGET_INTERVAL;
 unsigned long lastInterval;
 unsigned long timestampAdjust = 0;
 
@@ -101,7 +103,7 @@ void setup()
     {
       digitalWrite(ESP8266_LED, blinkState);
       delay(500);
-      blinkState = blinkState == LOW ? blinkState == HIGH :blinkState == LOW; 
+      blinkState = blinkState == LOW ? blinkState = HIGH :blinkState = LOW; 
       lastTime = millis();
     }
   }
@@ -118,7 +120,7 @@ void setup()
     {
       digitalWrite(ESP8266_LED, blinkState);
       delay(500);
-      blinkState = blinkState == LOW ? blinkState == HIGH :blinkState == LOW; 
+      blinkState = blinkState == LOW ? blinkState = HIGH :blinkState = LOW; 
       lastTime = millis();
     }
   }
@@ -321,6 +323,7 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status)
   }
   else if(status != 0)
   {
+    timestampAdjust = 0;
     #ifdef DEBUG_PRINT
     char macStr[18];
     Serial.print("Last Packet Sent to: ");
@@ -338,13 +341,23 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status)
 //
 void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
 {
+  if(data[0] != 'T')
+  {
+    return;
+  }
+  #ifdef DEBUG_PRINT
   Serial.print("Recv ");Serial.print(data_len);Serial.print(" bytes from: ");
   for(int idx = 0; idx < 6; idx++)
   {
     Serial.print(mac_addr[idx], HEX);Serial.print(":");
   }
+  #endif
   HubTimeStamp hubTimestamp;
   memcpy(&hubTimestamp, data, sizeof(hubTimestamp));
+  #ifndef DEBUG_PRINT
+  timestampAdjust =  micros() - hubTimestamp.timeStamp;
+  #endif
+  #ifdef DEBUG_PRINT
   unsigned long localTs = micros();
   timestampAdjust =  localTs - hubTimestamp.timeStamp;
   Serial.print(" local timestamp ");
@@ -359,4 +372,5 @@ void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
   Serial.print (timestampAdjust);
   Serial.print (" ");
   Serial.println (timestampAdjust, HEX);
+  #endif
 }

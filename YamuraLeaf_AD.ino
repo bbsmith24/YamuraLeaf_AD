@@ -20,8 +20,8 @@
 
 #define CHANNEL 3
 #define PRINTSCANRESULTS 0
-#define DELETEBEFOREPAIR 0
 #define MESSAGE_LEN 14
+#define TIMESTAMP_REQUEST_INTERVAL 5000000
 struct LeafData
 {
   char leafType;            // 1 byte  - type, in this case 'I' for IO - might need to make this 2 characters...
@@ -46,6 +46,7 @@ unsigned long curTime;
 unsigned long targetInterval = TARGET_INTERVAL;  // (sample at 20Hz)
 unsigned long sampleInterval = TARGET_INTERVAL;
 unsigned long lastInterval;
+unsigned long lastTimestampRequest = 0;
 unsigned long timestampAdjust = 0;
 
 uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
@@ -252,6 +253,7 @@ void requestTimestamp()
   Serial.print(" Type ");
   Serial.println((char)msgType);
   #endif
+  lastTimestampRequest = micros();
   uint8_t result = esp_now_send(hub_addr, &msgType, sizeof(msgType));
   #ifdef DEBUG_PRINT
   switch(result)
@@ -317,7 +319,9 @@ void InitESPNow() {
 void OnDataSent(uint8_t *mac_addr, uint8_t status) 
 {
 // first good send request timestamp adjustment
-  if((status == 0) && (timestampAdjust == 0))
+  if((status == 0) && 
+     (timestampAdjust == 0) &&
+     (micros() - lastTimestampRequest > TIMESTAMP_REQUEST_INTERVAL))
   {
     requestTimestamp();
   }

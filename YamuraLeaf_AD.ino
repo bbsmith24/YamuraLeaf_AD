@@ -32,22 +32,29 @@ union DataToSend
 {
   struct LeafData leafData;
   uint8_t dataBytes[MESSAGE_LEN];
-} toSend;
+} da2dToSend;
 
 struct HubTimeStamp
 {
   char msgType;
   unsigned long timeStamp;  // 4 bytes - micros() value of sample
-};
+} hubTimestamp;
+// data packet for received hub timestamp
+union HearbeatToSend
+{
+  HubTimeStamp heartbeat;
+  uint8_t dataBytes[5];
+} heartBeatToSend;
+
 
 unsigned long lastTime;
 unsigned long curTime;
-unsigned long targetInterval = TARGET_INTERVAL;  // (sample at 20Hz)
+unsigned long targetInterval = TARGET_INTERVAL;
 unsigned long sampleInterval = TARGET_INTERVAL;
-unsigned long lastInterval;
+unsigned long lastInterval = 0;
 unsigned long lastTimestampRequest = 0;
 unsigned long timestampAdjust = 0;
-
+bool startLogging = false;
 // hub MAC addres
 uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
 
@@ -90,7 +97,7 @@ void setup()
   lastTime = micros();
   curTime = micros();
   // leaf type
-  toSend.leafData.leafType = 'I';
+  da2dToSend.leafData.leafType = 'I';
 
   // start I2C and set up sensors
   Wire.begin();
@@ -138,9 +145,7 @@ void setup()
       blinkState = blinkState == LOW ? blinkState = HIGH :blinkState = LOW; 
   }
   digitalWrite(ESP8266_LED, LOW);
-  #ifdef DEBUG_PRINT
   Serial.println();
-  #endif
   curTime = micros();
   lastTime = curTime;
 }
@@ -150,31 +155,46 @@ void setup()
 void loop() 
 {
   curTime = micros();
-  lastInterval = curTime - lastTime; 
-  if(lastInterval >= sampleInterval)
+  // logging - check interval, send sensor updates
+  if(startLogging)
   {
-    if(lastInterval > targetInterval)
+    lastInterval = curTime - lastTime; 
+    if(lastInterval >= sampleInterval)
     {
-      sampleInterval = targetInterval - (lastInterval - targetInterval);
-      #ifdef DEBUG_PRINT
-      Serial.print("Target interval ");Serial.println(targetInterval);
-      Serial.print("Last interval ");Serial.println(lastInterval);
-      Serial.print("Delta ");Serial.println((lastInterval - targetInterval));
-      Serial.print("New sample interval ");Serial.println(sampleInterval); 
-      #endif
+      if(lastInterval > targetInterval)
+      {
+        sampleInterval = targetInterval - (lastInterval - targetInterval);
+        #ifdef DEBUG_PRINT
+        Serial.print("Target interval ");Serial.println(targetInterval);
+        Serial.print("Last interval ");Serial.println(lastInterval);
+        Serial.print("Delta ");Serial.println((lastInterval - targetInterval));
+        Serial.print("New sample interval ");Serial.println(sampleInterval); 
+        #endif
+      }
+      da2dToSend.leafData.timeStamp = curTime - timestampAdjust;;
+      for(int idx = 0; idx < 4; idx++) 
+      {
+        da2dToSend.leafData.a2dValues[idx] = adcSensor.getSingleEnded(idx);
+      }
+      da2dToSend.leafData.digitalValue = 0;
+      for(int idx = 0; idx < 16; idx++)
+      {
+        da2dToSend.leafData.digitalValue |= (io.digitalRead(idx) << idx);
+      }
+      sendData();
+      lastTime = curTime;
     }
-    toSend.leafData.timeStamp = curTime - timestampAdjust;;
-    for(int idx = 0; idx < 4; idx++) 
+  }
+  // not logging - every 10000000 micros (10 sec) send heartbeat
+  // triggers a timestamp send from hub  else
+  {
+    lastInterval = curTime - lastTime; 
+    if(lastInterval >= 10000000)
     {
-      toSend.leafData.a2dValues[idx] = adcSensor.getSingleEnded(idx);
+      heartBeatToSend.heartbeat.timeStamp = micros() - timestampAdjust;
+      SendHeartBeat();
+      lastTime = curTime;
     }
-    toSend.leafData.digitalValue = 0;
-    for(int idx = 0; idx < 16; idx++)
-    {
-      toSend.leafData.digitalValue |= (io.digitalRead(idx) << idx);
-    }
-    sendData();
-    lastTime = curTime;
   }
 }
 //
@@ -190,6 +210,7 @@ void sendData()
     #endif
     uint8_t addStatus = esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
   }
+  uint8_t result = esp_now_send(hub_addr, &da2dToSend.dataBytes[0], sizeof(da2dToSend));
   #ifdef DEBUG_PRINT
   Serial.print("To ");
   Serial.print(hub_addr[0], HEX);
@@ -199,59 +220,68 @@ void sendData()
     Serial.print(hub_addr[idx], HEX);
   }
   Serial.print(" Type ");
-  Serial.print(toSend.leafData.leafType);
+  Serial.print(da2dToSend.leafData.leafType);
   Serial.print(" Time ");
-  Serial.print(toSend.leafData.timeStamp);
+  Serial.print(da2dToSend.leafData.timeStamp);
   Serial.print(" A2D Values ");
   for(int idx = 0; idx < 4; idx++)
   {
-    Serial.print(toSend.leafData.a2dValues[idx]); Serial.print(" ");
+    Serial.print(da2dToSend.leafData.a2dValues[idx]); Serial.print(" ");
   }
   Serial.print(" DIGITAL Values ");
-  Serial.print(toSend.leafData.digitalValue, BIN); Serial.print(" ");
+  Serial.print(da2dToSend.leafData.digitalValue, BIN); Serial.print(" ");
   Serial.print(" bytes ");
-  Serial.print(toSend.dataBytes[0], HEX);
+  Serial.print(da2dToSend.dataBytes[0], HEX);
   for(int idx = 1; idx < MESSAGE_LEN; idx++)
   {
     Serial.print(" ");
-    Serial.print(toSend.dataBytes[idx], HEX);
+    Serial.print(da2dToSend.dataBytes[idx], HEX);
+  }
+  Serial.print("\n");
+  if(result != 0)
+  {
+    Serial.println("send error");
+  }
+  #endif
+}
+//
+// send heartbeat
+//
+void SendHeartBeat()
+{
+  // was disconnected from hub, try to reconnect
+  if(!esp_now_is_peer_exist(hub_addr))
+  {
+    #ifdef DEBUG_PRINT
+    Serial.println("Reconnectting");
+    #endif
+    uint8_t addStatus = esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
+  }
+  heartBeatToSend.heartbeat.msgType = 'H';
+  heartBeatToSend.heartbeat.timeStamp = micros() - timestampAdjust;
+  uint8_t result = esp_now_send(hub_addr, &heartBeatToSend.dataBytes[0], sizeof(heartBeatToSend));
+  #ifdef DEBUG_PRINT
+  Serial.print(micros());
+  Serial.print(" To ");
+  Serial.print(hub_addr[0], HEX);
+  for(int idx = 1; idx < 6; idx++)
+  {
+    Serial.print(":");
+    Serial.print(hub_addr[idx], HEX);
+  }
+  Serial.print(" Type ");
+  Serial.print(heartBeatToSend.heartbeat.msgType);
+  Serial.print(" Time ");
+  Serial.print(heartBeatToSend.heartbeat.timeStamp);
+  Serial.print(" bytes ");
+  Serial.print(heartBeatToSend.dataBytes[0], HEX);
+  for(int idx = 1; idx < 5; idx++)
+  {
+    Serial.print(" ");
+    Serial.print(heartBeatToSend.dataBytes[idx], HEX);
   }
   Serial.print("\n");
   #endif
-  uint8_t result = esp_now_send(hub_addr, &toSend.dataBytes[0], sizeof(LeafData));
-  switch(result)
-  {
-    case 0:
-      if(timestampAdjust == 0)
-      {
-        #ifdef DEBUG_PRINT
-        Serial.println("Request timestamp from hub on first succesful send");
-        #endif
-        requestTimestamp();
-      }
-      break;
-    //case ESP_ERR_ESPNOW_NOT_INIT:
-    //  Serial.println("\nESPNOW not Init");
-    //  break;
-    //case ESP_ERR_ESPNOW_ARG:
-    //  Serial.println("\nInvalid Argument");
-    //  break;
-    //case ESP_ERR_ESPNOW_INTERNAL:
-    //  Serial.println("\nInternal Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_NO_MEM:
-    //  Serial.println("\nESP_ERR_ESPNOW_NO_MEM");
-    //  break;
-    //case ESP_ERR_ESPNOW_NOT_FOUND:
-    //  Serial.println("\nPeer not found.");
-    //  break;
-    default:
-      #ifdef DEBUG_PRINT
-      Serial.println("requestTimestamp from hub due to send error");
-      #endif
-      requestTimestamp();
-      break;
-  }
 }
 //
 // request timestamp from hub
@@ -259,6 +289,9 @@ void sendData()
 void requestTimestamp()
 {
   uint8_t msgType = 'T';
+  lastTimestampRequest = micros();
+  uint8_t result = esp_now_send(hub_addr, &msgType, sizeof(msgType));
+  
   #ifdef DEBUG_PRINT
   Serial.print(micros());
   Serial.print("To ");
@@ -270,44 +303,9 @@ void requestTimestamp()
   }
   Serial.print(" Type ");
   Serial.println((char)msgType);
-  #endif
-  lastTimestampRequest = micros();
-  uint8_t result = esp_now_send(hub_addr, &msgType, sizeof(msgType));
-  #ifdef DEBUG_PRINT
-  switch(result)
+  if(result != 0)
   {
-    case 0:
-      break;
-    //case ESP_ERR_ESPNOW_NOT_INIT:
-    //  Serial.println("\nESPNOW not initialized Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_ARG:
-    //  Serial.println("\nInvalid Argument Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_NO_MEM:
-    //  Serial.println("\nOut of memory Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_FULL:
-    //  Serial.println("\nPeer list full Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_NOT_FOUND:
-    //  Serial.println("\nPeer not found Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_INTERNAL:
-    //  Serial.println("\nInternal Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_EXIST:
-    //  Serial.println("\nPeer has existed Error");
-    //  break;
-    //case ESP_ERR_ESPNOW_IF:
-    //  Serial.println("\nInterface error Error");
-    //  break;
-    default:
-      #ifdef DEBUG_PRINT
-      Serial.print("message send error ");
-      Serial.println(result);
-      #endif
-      break;
+    Serial.print("message send error ");
   }
   #endif
 }
@@ -366,40 +364,34 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status)
 //
 void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
 {
-  if(data[0] != 'T')
+  if(data[0] == 'T')
   {
-    return;
+    memcpy(&hubTimestamp, data, sizeof(hubTimestamp));
+    timestampAdjust =  micros() - hubTimestamp.timeStamp;
+    #ifdef DEBUG_PRINT
+    Serial.print("Recv ");Serial.print(data_len);Serial.print(" bytes from: ");
+    for(int idx = 0; idx < 6; idx++)
+    {
+      Serial.print(mac_addr[idx], HEX);Serial.print(":");
+    }
+    unsigned long localTs = micros();
+    Serial.print(" local timestamp ");
+    Serial.print (localTs);
+    Serial.print(" HUB timestamp ");
+    Serial.print (hubTimestamp.timeStamp);
+    Serial.print(" adjustment ");
+    Serial.print (timestampAdjust);
+    Serial.print(" corrected ");
+    Serial.println(localTs - timestampAdjust);
+    #endif
   }
-  #ifdef DEBUG_PRINT
-  Serial.print("Recv ");Serial.print(data_len);Serial.print(" bytes from: ");
-  for(int idx = 0; idx < 6; idx++)
+  // change state of logging
+  else if(data[0] == 'B')
   {
-    Serial.print(mac_addr[idx], HEX);Serial.print(":");
+    startLogging = true;
   }
-  #endif
-  HubTimeStamp hubTimestamp;
-  memcpy(&hubTimestamp, data, sizeof(hubTimestamp));
-  #ifndef DEBUG_PRINT
-  timestampAdjust =  micros() - hubTimestamp.timeStamp;
-  #endif
-  #ifdef DEBUG_PRINT
-  unsigned long localTs = micros();
-  timestampAdjust =  localTs - hubTimestamp.timeStamp;
-  Serial.print(" local timestamp ");
-  Serial.print (localTs);
-  Serial.print (" ");
-  Serial.print (localTs,HEX);
-  Serial.print(" HUB timestamp ");
-  Serial.print (hubTimestamp.timeStamp);
-  Serial.print (" ");
-  Serial.print (hubTimestamp.timeStamp, HEX);
-  Serial.print(" adjustment ");
-  Serial.print (timestampAdjust);
-  Serial.print (" ");
-  Serial.print (timestampAdjust, HEX);
-  Serial.print(" corrected ");
-  Serial.print (localTs - timestampAdjust);
-  Serial.print (" ");
-  Serial.println(localTs - timestampAdjust, HEX);
-  #endif
+  else if(data[0] == 'E')
+  {
+    startLogging = false;
+  }
 }

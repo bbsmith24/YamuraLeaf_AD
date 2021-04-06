@@ -5,7 +5,7 @@
 
    for ESP8266
  */
-//#define PRINT_DEBUG
+#define PRINT_DEBUG
 #define TARGET_INTERVAL 10000
 #define STATUS_LED 8
 #include <ESP8266WiFi.h>
@@ -18,10 +18,10 @@
 // define data logger structures/unions for transmitting/receiving data
 #include "DataStructures.h"
 
-// timestamp (H and T types)
+// timestamp (H, T, B, E types)
 TimeStampPacket timeStamp;
 // digital/A2D data (I type)
-IOPacket digitalData;
+CombinedIOPacket combinedPacket;
 
 unsigned long lastSampleTime;
 unsigned long currentSampleTime;
@@ -34,7 +34,8 @@ unsigned long sentCount = 0;
 unsigned long errorCount = 0;
 int blinkState = LOW;
 // hub MAC addres
-uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0xF6, 0x45, 0x80};
+
+uint8_t hub_addr[] = { 0x7C, 0x9E, 0xBD, 0x30, 0x54, 0xCC};
 
 // ADS1015 sensor
 ADS1015 adcSensor;
@@ -52,8 +53,7 @@ void setup()
   WiFi.mode(WIFI_STA);
   // This is the mac address of this device
   Serial.println();
-  Serial.print("YamuaraLeaf digital/A2D at ");
-  Serial.print("MAC: "); Serial.println(WiFi.macAddress());
+  Serial.print("YamuaraLeaf Combined Digital/A2D ");Serial.println(WiFi.macAddress());
   // Init ESPNow with a fallback logic
   InitESPNow();
   // Once ESPNow is successfully Init, we will register for Send CB to
@@ -67,10 +67,7 @@ void setup()
   esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
 
   // leaf type
-  digitalData.packet.leafType[0] = 'I';
-  digitalData.packet.leafType[1] = 0;
-  digitalData.packet.leafType[2] = 0;
-  digitalData.packet.leafType[3] = 0;
+  combinedPacket.packet.leafType = COMBINEDIO_LEAFTYPE;
 
   // start I2C and set up sensors
   Wire.begin();
@@ -89,6 +86,10 @@ void setup()
       blinkState = blinkState == LOW ? blinkState = HIGH :blinkState = LOW; 
     }
   }
+  adcSensor.setMode(0);
+  adcSensor.setGain(ADS1015_CONFIG_PGA_TWOTHIRDS);
+  adcSensor.setSampleRate(ADS1015_CONFIG_RATE_1600HZ);
+  
   #ifdef PRINT_DEBUG
   Serial.println("ADS1015 ready");
   #endif
@@ -143,15 +144,15 @@ void loop()
     if(lastSampleInterval >= targetInterval)
     {
       currentSampleTime = micros();
-      digitalData.packet.timeStamp = currentSampleTime - timestampAdjust;;
+      combinedPacket.packet.timeStamp = currentSampleTime - timestampAdjust;;
       for(int idx = 0; idx < 4; idx++) 
       {
-        digitalData.packet.a2dValues[idx] = adcSensor.getSingleEnded(idx);
+        combinedPacket.packet.a2dValues[idx] = adcSensor.getSingleEnded(idx);
       }
-      digitalData.packet.digitalValue = 0;
+      combinedPacket.packet.digitalValue = 0;
       for(int idx = 0; idx < 16; idx++)
       {
-        digitalData.packet.digitalValue |= (io.digitalRead(idx) << idx);
+        combinedPacket.packet.digitalValue |= (io.digitalRead(idx) << idx);
       }
       // send data to hub
       sendData();
@@ -162,7 +163,27 @@ void loop()
   // triggers a timestamp send from hub
   else
   {
+    combinedPacket.packet.timeStamp = currentSampleTime - timestampAdjust;;
     lastSampleInterval = currentSampleTime - lastSampleTime; 
+    if(lastSampleInterval >= targetInterval)
+    {
+      Serial.print(micros());
+      Serial.print(" ");
+      for(int idx = 0; idx < 4; idx++) 
+      {
+        combinedPacket.packet.a2dValues[idx] = adcSensor.getSingleEnded(idx);
+        Serial.print(combinedPacket.packet.a2dValues[idx]);
+        Serial.print(" ");
+      }
+      combinedPacket.packet.digitalValue = 0;
+      for(int idx = 0; idx < 16; idx++)
+      {
+        combinedPacket.packet.digitalValue |= (io.digitalRead(idx) << idx);
+      }
+      Serial.println(combinedPacket.packet.digitalValue, HEX);
+      lastSampleInterval = currentSampleTime - lastSampleTime; 
+      lastSampleTime = currentSampleTime;
+    }
     if(lastSampleInterval >= 10000000)
     {
       SendHeartBeat();
@@ -175,7 +196,7 @@ void loop()
 //
 void sendData()
 {
-  uint8_t result = esp_now_send(hub_addr, &digitalData.dataBytes[0], sizeof(digitalData));
+  uint8_t result = esp_now_send(hub_addr, &combinedPacket.dataBytes[0], sizeof(CombinedIOPacket));
   sentCount++;
   #ifdef PRINT_DEBUG
   Serial.print("To ");
@@ -186,15 +207,15 @@ void sendData()
     Serial.print(hub_addr[idx], HEX);
   }
   Serial.print(" Type ");
-  Serial.print(digitalData.packet.leafType);
+  Serial.print(combinedPacket.packet.leafType);
   Serial.print(" Time ");
-  Serial.print(digitalData.packet.timeStamp);
+  Serial.print(combinedPacket.packet.timeStamp);
   Serial.print(" ACCEL Values ");
-  Serial.print(digitalData.packet.a2dValues[0]); Serial.print(" ");
-  Serial.print(digitalData.packet.a2dValues[1]); Serial.print(" ");
-  Serial.print(digitalData.packet.a2dValues[2]); Serial.print(" ");
-  Serial.print(digitalData.packet.a2dValues[3]); Serial.print(" ");
-  Serial.println(digitalData.packet.digitalValue, HEX);
+  Serial.print(combinedPacket.packet.a2dValues[0]); Serial.print(" ");
+  Serial.print(combinedPacket.packet.a2dValues[1]); Serial.print(" ");
+  Serial.print(combinedPacket.packet.a2dValues[2]); Serial.print(" ");
+  Serial.print(combinedPacket.packet.a2dValues[3]); Serial.print(" ");
+  Serial.println(combinedPacket.packet.digitalValue, HEX);
   #endif
   if(result != 0)
   {
@@ -219,7 +240,7 @@ void SendHeartBeat()
     #endif
     uint8_t addStatus = esp_now_add_peer(hub_addr, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
   }
-  timeStamp.packet.msgType[0] = 'H';
+  timeStamp.packet.msgType = 'H';
   timeStamp.packet.timeStamp = micros() - timestampAdjust;
   uint8_t result = esp_now_send(hub_addr, &timeStamp.dataBytes[0], sizeof(timeStamp));
   #ifdef PRINT_DEBUG
@@ -250,7 +271,7 @@ void SendHeartBeat()
 //
 void requestTimestamp()
 {
-  timeStamp.packet.msgType[0] = 'T';
+  timeStamp.packet.msgType = TIMESTAMP_TYPE;
   timeStamp.packet.timeStamp = micros() - timestampAdjust;
   uint8_t result = esp_now_send(hub_addr, &timeStamp.dataBytes[0], sizeof(timeStamp));
   #ifdef PRINT_DEBUG
@@ -263,7 +284,7 @@ void requestTimestamp()
     Serial.print(hub_addr[idx], HEX);
   }
   Serial.print(" Type ");
-  Serial.println((char)timeStamp.packet.msgType[0]);
+  Serial.println((char)timeStamp.packet.msgType);
   if(result != 0)
   {
     Serial.print("message send error ");
@@ -314,7 +335,7 @@ void OnDataSent(uint8_t *mac_addr, uint8_t status)
 //
 void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
 {
-  if(data[0] == 'T')
+  if(data[0] == TIMESTAMP_TYPE)
   {
     memcpy(&timeStamp.dataBytes, data, sizeof(timeStamp));
     timestampAdjust =  micros() - timeStamp.packet.timeStamp;
@@ -337,12 +358,12 @@ void OnDataRecv(uint8_t *mac_addr, uint8_t *data, uint8_t data_len)
     #endif
   }
   // change state of logging
-  else if(data[0] == 'B')
+  else if(data[0] == LOGGING_BEGIN)
   {
     Serial.println("Logging");
     isLogging = true;
   }
-  else if(data[0] == 'E')
+  else if(data[0] == LOGGING_END)
   {
     Serial.println("Idle");
     isLogging = false;

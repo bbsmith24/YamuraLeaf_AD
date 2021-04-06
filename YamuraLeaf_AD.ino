@@ -87,8 +87,8 @@ void setup()
     }
   }
   adcSensor.setMode(0);
-  adcSensor.setGain(ADS1015_CONFIG_PGA_TWOTHIRDS);
-  adcSensor.setSampleRate(ADS1015_CONFIG_RATE_1600HZ);
+  adcSensor.setGain(ADS1015_CONFIG_PGA_1);
+  adcSensor.setSampleRate(ADS1015_CONFIG_RATE_3300HZ);
   
   #ifdef PRINT_DEBUG
   Serial.println("ADS1015 ready");
@@ -145,12 +145,12 @@ void loop()
     {
       currentSampleTime = micros();
       combinedPacket.packet.timeStamp = currentSampleTime - timestampAdjust;;
-      for(int idx = 0; idx < 4; idx++) 
+      for(uint8_t idx = 0; idx < 4; idx++) 
       {
-        combinedPacket.packet.a2dValues[idx] = adcSensor.getSingleEnded(idx);
+        combinedPacket.packet.a2dValues[idx] = (int16_t)adcSensor.getSingleEnded(idx);
       }
       combinedPacket.packet.digitalValue = 0;
-      for(int idx = 0; idx < 16; idx++)
+      for(uint8_t idx = 0; idx < 16; idx++)
       {
         combinedPacket.packet.digitalValue |= (io.digitalRead(idx) << idx);
       }
@@ -165,25 +165,6 @@ void loop()
   {
     combinedPacket.packet.timeStamp = currentSampleTime - timestampAdjust;;
     lastSampleInterval = currentSampleTime - lastSampleTime; 
-    if(lastSampleInterval >= targetInterval)
-    {
-      Serial.print(micros());
-      Serial.print(" ");
-      for(int idx = 0; idx < 4; idx++) 
-      {
-        combinedPacket.packet.a2dValues[idx] = adcSensor.getSingleEnded(idx);
-        Serial.print(combinedPacket.packet.a2dValues[idx]);
-        Serial.print(" ");
-      }
-      combinedPacket.packet.digitalValue = 0;
-      for(int idx = 0; idx < 16; idx++)
-      {
-        combinedPacket.packet.digitalValue |= (io.digitalRead(idx) << idx);
-      }
-      Serial.println(combinedPacket.packet.digitalValue, HEX);
-      lastSampleInterval = currentSampleTime - lastSampleTime; 
-      lastSampleTime = currentSampleTime;
-    }
     if(lastSampleInterval >= 10000000)
     {
       SendHeartBeat();

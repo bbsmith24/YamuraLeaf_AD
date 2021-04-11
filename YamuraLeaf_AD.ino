@@ -10,6 +10,8 @@
 #define STATUS_LED 8
 #include <ESP8266WiFi.h>
 #include <espnow.h>
+#include <queue.h>
+
 #include <Wire.h>
 // 4 channel A2D
 #include <SparkFun_ADS1015_Arduino_Library.h>
@@ -42,6 +44,12 @@ ADS1015 adcSensor;
 // SX1509 sensor
 const byte SX1509_ADDRESS = 0x3E;
 SX1509 io;
+//
+//
+//
+xQueueHandle  sensorSendQueue;
+xQueueHandle  timeStampSendQueue;
+xQueueHandle  timeStampReceiveQueue;
 //
 //
 //
@@ -129,6 +137,15 @@ void setup()
   // set last and current sample 
   currentSampleTime = micros();
   lastSampleTime = currentSampleTime;
+
+  // create a queue for sensor readings and timestamps to send
+  // send function will pull from here to send to hub
+  sensorSendQueue = xQueueCreate(100, sizeof(CombinedIOPacket));
+  timeStampSendQueue = xQueueCreate(100, sizeof(TimeStampPacket));
+  // create a queue for timestamps received
+  // receive function put messages received from hub here
+  timeStampReceiveQueue = xQueueCreate(100, sizeof(TimeStampPacket));
+  
   Serial.println("Running, Idle");
 }
 //
@@ -154,8 +171,9 @@ void loop()
       {
         combinedPacket.packet.digitalValue |= (io.digitalRead(idx) << idx);
       }
-      // send data to hub
-      sendData();
+      // put data in queue to send to hub
+      xQueueSendToBack( sensorSendQueue, &combinedPacket, portMAX_DELAY );
+      //sendData();
       lastSampleTime = currentSampleTime;
     }
   }
@@ -163,7 +181,6 @@ void loop()
   // triggers a timestamp send from hub
   else
   {
-    combinedPacket.packet.timeStamp = currentSampleTime - timestampAdjust;;
     lastSampleInterval = currentSampleTime - lastSampleTime; 
     if(lastSampleInterval >= 10000000)
     {
